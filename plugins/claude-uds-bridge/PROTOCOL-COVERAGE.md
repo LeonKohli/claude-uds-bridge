@@ -1,6 +1,6 @@
 # Coverage against Claude Code
 
-The reference is Claude Code's [cross-session messaging documentation](https://code.claude.com/docs/en/cross-session-messaging). Wire details and guard constants were additionally checked against an installed Claude Code 2.1.270. This plugin targets local Codex desktop tasks on macOS.
+The reference is Claude Code's [cross-session messaging documentation](https://code.claude.com/docs/en/cross-session-messaging). Wire details and guard constants were additionally checked against an installed Claude Code 2.1.270. This plugin targets local Codex desktop tasks. The suite runs on macOS and Linux; the desktop counterpart is a fixture on both.
 
 The bridge covers local messaging, including confirmed input correlation, hop-chain continuation, and automatically triggered hold dialogs. Full behavioral parity is missing, most of all Codex's separate follow-up queue, parts of dialog management, and own-child support.
 
@@ -96,7 +96,7 @@ The permitted deadline values come from the [settings reference](https://code.cl
 | Native preview, `/status`, `/peers`, `@` picker | Codex uses MCP tools and its own text input. Claude's UI is not reproduced. A failed hook start appears in the hook result, and `status` then shows no reply address. |
 | CLI, bare mode, and `-p` | No standalone Codex CLI receiver. The inbox needs the desktop app. |
 | Other users and separate filesystems | No shared discovery. No connection across container or WSL boundaries. |
-| Windows named pipes | Not implemented. The Linux transport is not verified live. |
+| Windows named pipes | Not implemented. The suite passes on macOS and Linux, so the POSIX transport covers both. |
 | Cloud and Remote Control | Outside the local UDS bridge. Offline redelivery, remote name resolution, and server-relayed messages are therefore absent. |
 | Remote privacy and `isolatePeerMachines` | No remote feature exists. |
 | Provider and Claude version | Discovery follows a running peer with protocol 1 and the capabilities it advertises. Claude's provider and feature settings are never touched. |

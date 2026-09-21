@@ -8,8 +8,8 @@ Messages travel over Unix domain sockets in a private per-user directory. Nothin
 
 ## Requirements
 
-- macOS. The bridge uses POSIX sockets and the Codex desktop IPC socket. Linux is untested.
-- The Codex desktop app, running. Delivery goes through a task's IPC connection, so a CLI-only Codex has no inbox.
+- The Codex desktop app, running. Delivery goes through a task's IPC connection, so a CLI-only Codex has no inbox. This is the real platform constraint: the bridge runs wherever that app does.
+- macOS or Linux. The transport uses POSIX sockets, and CI runs the suite on both. Windows named pipes are not implemented.
 - Claude Code 2.1.224 or later, the first release with [cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging).
 - Bun on your `PATH`. The lifecycle hook and the MCP server both run under Bun.
 
