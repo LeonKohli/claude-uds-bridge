@@ -1,6 +1,6 @@
 {
   "name": "claude-uds-bridge",
-  "version": "0.1.0+codex.20260916132350",
+  "version": "0.1.0",
   "description": "Discover and message live Claude Code and Codex sessions through local UDS inboxes.",
   "author": {
     "name": "Leon Kohli"
