@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "claude_uds_bridge": {
+      "command": "bun",
+      "args": ["./dist/server.js"],
+      "cwd": ".",
+      "required": true,
+      "env_vars": ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "PATH", "HOME"]
+    }
+  }
+}

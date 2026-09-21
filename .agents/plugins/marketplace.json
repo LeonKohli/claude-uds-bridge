@@ -1,0 +1,20 @@
+{
+  "name": "leonkohli",
+  "interface": {
+    "displayName": "Leon Kohli"
+  },
+  "plugins": [
+    {
+      "name": "claude-uds-bridge",
+      "source": {
+        "source": "local",
+        "path": "./plugins/claude-uds-bridge"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

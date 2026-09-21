@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "^(startup|resume|clear)$",
+      "hooks": [{ "type": "mcp_tool", "server": "claude_uds_bridge", "tool": "session_start", "input": { "cwd": "${cwd}" }, "timeout": 15 }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{ "type": "command", "command": "bun \"${PLUGIN_ROOT}/dist/hook.js\"", "timeout": 3 }]
+    }]
+  }
+}

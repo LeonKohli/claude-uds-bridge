@@ -1,0 +1,23 @@
+{
+  "name": "claude-uds-bridge",
+  "version": "0.1.0+codex.20260916132350",
+  "description": "Discover and message live Claude Code and Codex sessions through local UDS inboxes.",
+  "author": {
+    "name": "Leon Kohli"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/LeonKohli/claude-uds-bridge",
+  "interface": {
+    "displayName": "Claude UDS Bridge",
+    "shortDescription": "Exchange messages with local Claude Code sessions.",
+    "longDescription": "Session lifecycle hooks make this task discoverable through Claude ListAgents. Peer messages steer its active turn or start a new turn when idle. MCP provides listing, sending and status.",
+    "developerName": "Leon Kohli",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": "Show my local agent sessions and this task's receive status."
+  },
+  "mcpServers": "./.mcp.json"
+}
