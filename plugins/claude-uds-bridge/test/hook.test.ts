@@ -55,7 +55,10 @@ test('session hooks own one receiver per task, restore it after resume and clean
   const hook = async (id: string, hook_event_name: 'SessionStart' | 'SessionEnd', expectedExit = 0) => {
     const entrypoint = process.env.UDS_HOOK_TEST_ENTRYPOINT ?? join(import.meta.dir, '../src/hook.ts');
     const child = Bun.spawn([process.execPath, entrypoint], {
-      env: { ...process.env, CODEX_HOME: codexHome, CLAUDE_CONFIG_DIR: configDir, CLAUDE_CODE_TMPDIR: root },
+      // Both point at root, whose cc-socks is deliberately 0755, so the hook has to reject it
+      // and fall back. A real XDG_RUNTIME_DIR would be private and the fallback would never run.
+      env: { ...process.env, CODEX_HOME: codexHome, CLAUDE_CONFIG_DIR: configDir,
+        XDG_RUNTIME_DIR: root, CLAUDE_CODE_TMPDIR: root },
       stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
     });
     child.stdin.write(JSON.stringify({ session_id: id, cwd: root, hook_event_name }));
