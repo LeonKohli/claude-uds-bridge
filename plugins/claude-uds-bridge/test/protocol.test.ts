@@ -109,7 +109,7 @@ test('outbound hops follow the last committed peer input and reset at a real use
   try {
     await f.transmit({ type: 'user', msg_id: id, message: { role: 'user', content:
       `<cross-session-message hop-chain="${token}" from-mode="prompting">relay test</cross-session-message>` } });
-    await until(() => f.bridge.status().messages.some(row => row.id === id && row.status === 'started'));
+    await until(() => f.desktop.submissions.length === 1);
     const steering = { type: 'steeringUserMessage', id, clientUserMessageId: f.submittedInputId(), serverUserMessageId: null, status: 'accepted' };
     f.desktop.setHistory({ turns: [{ items: [user, steering] }] });
     await f.bridge.sendMessage(f.peerId, 'before consumption');
@@ -149,9 +149,8 @@ test('50 unread accepted messages are separate from held capacity and free a slo
     expect(f.desktop.submissions).toHaveLength(0);
     const serverId = randomUUID();
     f.desktop.setHistory({ turns: [{ items: [{ ...steering, serverUserMessageId: serverId }, { type: 'steered', id: serverId }] }] });
-    const next = await f.message('prompting');
-    await until(() => f.bridge.status().messages.some(row => row.id === next && row.status === 'started'));
-    expect(f.desktop.submissions).toHaveLength(1);
+    await f.message('prompting');
+    await until(() => f.desktop.submissions.length === 1);
     expect(f.bridge.status().unreadCount).toBe(50);
   } finally { await f.close(); }
 });
@@ -159,8 +158,8 @@ test('50 unread accepted messages are separate from held capacity and free a slo
 test('idle stays pending while an accepted peer input has not been consumed', async () => {
   const f = await fixture();
   try {
-    const id = await f.message('prompting');
-    await until(() => f.bridge.status().messages.some(row => row.id === id && row.status === 'started'));
+    await f.message('prompting');
+    await until(() => f.desktop.submissions.length === 1);
     const subscription = randomUUID();
     await f.transmit({ type: 'control', action: 'notify_when_idle', msg_id: subscription, from_mode: 'prompting' });
     await until(() => f.bridge.status().idleRequests.some(row => row.id === subscription));
@@ -181,7 +180,7 @@ test('a peer cannot claim an existing user input by choosing its client ID as ms
     f.desktop.setHistory({ turns: [{ items: [{ type: 'userMessage', id: randomUUID(), clientId: id }] }] });
     await f.transmit({ type: 'user', msg_id: id, message: { role: 'user', content:
       `<cross-session-message hop-chain="${'b'.repeat(24)}" from-mode="prompting">collision test</cross-session-message>` } });
-    await until(() => f.bridge.status().messages.some(row => row.id === id && row.status === 'started'));
+    await until(() => f.desktop.submissions.length === 1);
     await f.bridge.sendMessage(f.peerId, 'still the real user input');
     const frame = f.frames.find(frame => frame.type === 'user');
     expect(frame?.type === 'user' && hopChain(frame.message.content)).toHaveLength(1);
@@ -287,6 +286,42 @@ test('list_sessions names the agent kind and start time and leaves out the calli
     expect(own).toMatchObject({ agent: 'codex', name: f.bridge.status().name });
     expect(Date.parse(own?.startedAt ?? '')).toBeGreaterThan(1700000000000);
   } finally { await client.close(); await f.close(); }
+});
+
+test('the outbound socket sends only this receiver own frames to the peer they name', async () => {
+  const f = await fixture();
+  const address = f.bridge.status().replyAddress;
+  if (!address) throw new Error('Missing receiver');
+  const peer = findPeer(f.configDir, f.peerId);
+  // Any process of this user can open the .out socket, so it re-checks the sender and the
+  // target instead of trusting the request. Without that, one task could send as another.
+  const ask = async (request: Record<string, unknown>) => {
+    const socket = net.createConnection(address.slice(4).replace(/\.sock$/, '.out'));
+    await once(socket, 'connect');
+    socket.write(JSON.stringify(request) + '\n');
+    const [data] = await once(socket, 'data');
+    socket.destroy();
+    return z.object({ written: z.boolean().optional(), refused: z.string().optional(), error: z.string().optional() })
+      .parse(JSON.parse(String(data).split('\n')[0]!));
+  };
+  const frame = (from: string) => ({ msgV: 1, type: 'user', msg_id: randomUUID(), from,
+    session_id: peer.sessionId, message: { role: 'user', content: 'outbound probe' } });
+  const target = { sessionId: f.peerId, socketPath: peer.messagingSocketPath, procStart: peer.procStart ?? null };
+  try {
+    expect(await ask({ ...target, frames: [frame(address)] })).toEqual({ written: true });
+    expect(await ask({ ...target, frames: [frame('uds:/tmp/not-this-receiver.sock')] })).toHaveProperty('error');
+    expect(await ask({ ...target, socketPath: '/tmp/not-the-peer.sock', frames: [frame(address)] })).toHaveProperty('error');
+    expect(await ask({ ...target, procStart: 'Thu Jan  1 00:00:00 2026', frames: [frame(address)] })).toHaveProperty('error');
+    expect(f.frames.filter(item => item.type === 'user' && item.message.content === 'outbound probe')).toHaveLength(1);
+  } finally { await f.close(); }
+});
+
+test('a task cannot send to itself', async () => {
+  const f = await fixture();
+  try {
+    await expect(f.bridge.sendMessage(f.desktop.threadId, 'to myself')).rejects.toThrow('Cannot send to this task itself');
+    expect(f.frames).toHaveLength(0);
+  } finally { await f.close(); }
 });
 
 test('batch drop receipts settle every correlated send and ignore late held receipts', async () => {
