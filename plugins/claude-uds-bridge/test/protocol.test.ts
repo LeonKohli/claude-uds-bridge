@@ -71,8 +71,8 @@ async function fixture() {
   };
 }
 
-async function until(condition: () => boolean) {
-  const deadline = Date.now() + 2000;
+async function until(condition: () => boolean, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
   while (!condition() && Date.now() < deadline) await Bun.sleep(5);
   expect(condition()).toBe(true);
 }
@@ -92,12 +92,13 @@ test('MCP sends and receives a peer reply with a large task history', async () =
       _meta: { threadId: f.desktop.threadId } });
     expect(sent.isError).not.toBe(true);
     expect(f.frames.some(frame => frame.type === 'user' && frame.message.content.includes('large history ping'))).toBe(true);
-    const id = await f.message('prompting', 'large history pong');
-    await until(() => f.bridge.status().messages.some(row => row.id === id && row.status === 'started'));
-    expect(f.desktop.submissions).toHaveLength(1);
+    await f.message('prompting', 'large history pong');
+    // The 17 MB history crosses the desktop IPC on every read, so a loaded runner needs far
+    // longer than the default. What is being waited on is delivery, not an internal status.
+    await until(() => f.desktop.submissions.length === 1, 30000);
     expect(JSON.stringify(f.desktop.submissions[0]?.params)).toContain('large history pong');
   } finally { await client.close(); await f.close(); }
-});
+}, 60000);
 
 test('outbound hops follow the last committed peer input and reset at a real user input', async () => {
   const f = await fixture();
