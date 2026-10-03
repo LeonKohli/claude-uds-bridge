@@ -7,10 +7,12 @@
   },
   "license": "MIT",
   "homepage": "https://github.com/LeonKohli/claude-uds-bridge",
+  "repository": "https://github.com/LeonKohli/claude-uds-bridge",
+  "keywords": ["claude-code", "codex", "messaging", "multi-agent", "mcp"],
   "interface": {
     "displayName": "Claude UDS Bridge",
     "shortDescription": "Exchange messages with local Claude Code sessions.",
-    "longDescription": "Session lifecycle hooks make this task discoverable through Claude ListAgents. Peer messages steer its active turn or start a new turn when idle. MCP provides listing, sending and status.",
+    "longDescription": "Session lifecycle hooks make this task discoverable through Claude ListAgents. Peer messages steer its active turn or start a new turn when idle. MCP provides listing, sending, status, and inbox controls.",
     "developerName": "Leon Kohli",
     "category": "Productivity",
     "capabilities": [
