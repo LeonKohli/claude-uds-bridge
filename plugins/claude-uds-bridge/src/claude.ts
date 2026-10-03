@@ -26,19 +26,30 @@ export type Peer = z.infer<typeof registry>;
 export const modeSchema = z.enum(['prompting', 'bypass']);
 export const frameSchema = z.union([
   z.object({ msgV: z.literal(1), type: z.literal('user'), msg_id: uuid, from: z.string(),
-    session_id: uuid.optional(), priority: z.literal('next').optional(),
+    session_id: uuid.optional(), priority: z.enum(['now', 'next', 'later']).optional(),
+    file_attachments: z.array(z.unknown()).optional(),
     message: z.object({ role: z.literal('user'), content: z.string().min(1).max(maxLineLength) }) }),
-  z.object({ msgV: z.literal(1), type: z.literal('control'), from: z.string(),
+  z.object({ msgV: z.literal(1), type: z.literal('control'), from: z.string(), session_id: uuid.optional(),
     action: z.literal('peer_message_status'), orig_msg_id: uuid,
     status: z.enum(['held', 'denied', 'expired', 'delivered', 'refused', 'dropped']), status_detail: z.string().optional(),
-    drop_reason: z.string().optional(), dropped_msg_ids: z.array(uuid).max(256).optional() }),
-  z.object({ msgV: z.literal(1), type: z.literal('control'), from: z.string(),
+    reason: z.string().optional(), drop_reason: z.string().optional(), dropped_msg_ids: z.array(uuid).max(256).optional() }),
+  z.object({ msgV: z.literal(1), type: z.literal('control'), from: z.string(), session_id: uuid.optional(),
     action: z.literal('notify_when_idle'), msg_id: uuid, from_mode: z.string().optional() }),
-  z.object({ msgV: z.literal(1), type: z.literal('control'), from: z.string(),
+  z.object({ msgV: z.literal(1), type: z.literal('control'), from: z.string(), session_id: uuid.optional(),
     action: z.literal('peer_idle_notice'), msg_id: uuid.optional(), orig_msg_id: uuid,
     state: z.string(), finished_at: z.number().finite().nonnegative().optional(), detail: z.string().max(65536).optional(), from_mode: z.string().optional() }),
 ]);
 export type Frame = z.infer<typeof frameSchema>;
+
+export function peerAddress(path: string) {
+  return 'uds:' + path.replace(/[^A-Za-z0-9:_/.\\-]/gu, part => Array.from(new TextEncoder().encode(part),
+    byte => `%${byte.toString(16).toUpperCase().padStart(2, '0')}`).join(''));
+}
+
+export function socketPath(address: string) {
+  if (!address.startsWith('uds:')) throw new Error('Invalid peer address');
+  return decodeURIComponent(address.slice(4));
+}
 
 export function ownedJson(path: string, maxBytes: number): unknown {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -72,7 +83,7 @@ export function peers(configDir: string): Peer[] {
   for (const file of files.filter(name => /^[1-9][0-9]*\.json$/.test(name))) {
     try {
       const peer = registry.parse(ownedJson(join(directory, file), 256 * 1024));
-      if (file !== `${peer.pid}.json` || basename(peer.messagingSocketPath) !== `${peer.pid}.sock`) continue;
+      if (file !== `${peer.pid}.json`) continue;
       process.kill(peer.pid, 0);
       checkSocket(peer.messagingSocketPath);
       result.push(peer);
@@ -86,6 +97,14 @@ export function findPeer(configDir: string, sessionId: string): Peer {
   const peer = matches[0];
   if (!peer || matches.length !== 1) throw new Error('Claude session is unavailable or ambiguous; list sessions again');
   return peer;
+}
+
+// A /clear gives a Claude process a new sessionId but keeps its PID and start time, so stored
+// references to a peer resolve by process identity, not by sessionId.
+export function findPeerProcess(configDir: string, address: string, procStart: string | null): Peer {
+  const matches = peers(configDir).filter(peer => peerAddress(peer.messagingSocketPath) === address && (peer.procStart ?? null) === procStart);
+  if (matches.length !== 1) throw new Error('Claude process is unavailable or has restarted');
+  return matches[0]!;
 }
 
 export async function processStart(pid: number) {
@@ -118,7 +137,7 @@ export async function register(configDir: string, sessionId: string, address: st
   const record = { pid: process.pid, sessionId, cwd, name: sessionName(configDir, cwd, sessionId),
     startedAt: Date.now(), procStart: await processStart(process.pid), peerProtocol: 1,
     ...(process.platform === 'darwin' ? { pidDomain: 'darwin' } : {}),
-    kind: 'interactive', entrypoint: 'codex-claude-uds-bridge', messagingSocketPath: address.slice(4),
+    kind: 'interactive', entrypoint: 'codex-claude-uds-bridge', messagingSocketPath: socketPath(address),
     status, statusUpdatedAt: Date.now(), peerFeatures: ['notify_idle'] };
   writeFileSync(path, JSON.stringify(record), { flag: 'wx', mode: 0o600 });
   const check = () => {
@@ -172,7 +191,7 @@ export async function inbox(directory: string, receive: (frame: Frame) => void) 
   finally { process.umask(mask); }
   chmodSync(path, 0o600);
   return {
-    address: `uds:${path}`,
+    address: peerAddress(path),
     close: () => new Promise<void>((resolve, reject) => {
       for (const socket of sockets) socket.destroy();
       server.close(error => error ? reject(error) : resolve());
@@ -191,12 +210,12 @@ export function hopChain(text: string) {
 }
 
 // fromName must be the registered name: the receiver replies to what its ListAgents listing shows.
-export function userFrame(peer: Peer, address: string, fromName: string, id: string, text: string, mode: string, token: string | null, previous: string[] = []) {
+export function userFrame(peer: Peer, address: string, fromName: string, fromSession: string, id: string, text: string, mode: string, token: string | null, previous: string[] = []) {
   const body = text.replaceAll('</cross-session-message', '<\\/cross-session-message');
   const chain = [...previous, ...(token ? [token] : [])].slice(-32).join(',');
   return { msgV: 1, msg_id: id, type: 'user', priority: 'next', from: address,
     session_id: peer.sessionId, message: { role: 'user', content:
-      `<cross-session-message from="${address}"${chain ? ` hop-chain="${chain}"` : ''} from-name="${fromName}"${modeSchema.safeParse(mode).success ? ` from-mode="${mode}"` : ''}>\n${body}\n</cross-session-message>` } };
+      `<cross-session-message from="${address}" from-session="${fromSession}"${chain ? ` hop-chain="${chain}"` : ''} from-name="${fromName}"${modeSchema.safeParse(mode).success ? ` from-mode="${mode}"` : ''}>\n${body}\n</cross-session-message>` } };
 }
 
 export function accountReceipt(peer: Peer, status: string, previous: string) {

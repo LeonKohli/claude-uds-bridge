@@ -13,8 +13,8 @@ import { Bridge } from '../src/bridge';
 import { findPeer, frameSchema, hopChain, maxLineLength, peers, sendFrames, sessionName, userFrame } from '../src/claude';
 import { receiver } from './desktop-fixture';
 
-async function fixture() {
-  const root = mkdtempSync('/tmp/uds-protocol-');
+async function fixture(prefix = '/tmp/uds-protocol-') {
+  const root = mkdtempSync(prefix);
   const desktop = await receiver('idle', false, false, root);
   const configDir = join(root, 'claude');
   const stateDir = join(root, 'plugin-state', 'claude-uds-bridge');
@@ -53,7 +53,7 @@ async function fixture() {
     return z.string().parse(params.clientUserMessageId ?? params.turnStart?.request.clientUserMessageId);
   };
   const transmit = async (frame: Record<string, unknown>) => {
-    const path = bridge.status().replyAddress?.slice(4);
+    const path = peers(configDir).find(peer => peer.sessionId === desktop.threadId)?.messagingSocketPath;
     if (!path) throw new Error('No receiver');
     const socket = net.createConnection(path);
     await once(socket, 'connect');
@@ -76,6 +76,94 @@ async function until(condition: () => boolean, timeoutMs = 2000) {
   while (!condition() && Date.now() < deadline) await Bun.sleep(5);
   expect(condition()).toBe(true);
 }
+
+test('socket addresses with spaces, percent signs, and Unicode preserve messages and receipts', async () => {
+  const f = await fixture('/tmp/uds proto%é-');
+  const encode = (path: string) => `uds:${path.replaceAll('%', '%25').replaceAll(' ', '%20').replaceAll('é', '%C3%A9')}`;
+  try {
+    const own = findPeer(f.configDir, f.desktop.threadId);
+    expect(own.messagingSocketPath).toContain('/uds proto%é-');
+    expect(f.bridge.status().replyAddress).toBe(encode(own.messagingSocketPath));
+    await f.transmit({ type: 'user', from: encode(f.peerPath), msg_id: randomUUID(),
+      message: { role: 'user', content: 'encoded path input' } });
+    await until(() => f.desktop.submissions.length === 1);
+    const sent = await f.bridge.sendMessage(f.peerId, 'encoded path reply');
+    const frame = f.frames.find(frame => frame.type === 'user');
+    expect(frame?.from).toBe(encode(own.messagingSocketPath));
+    expect(frame?.type === 'user' && frame.message.content).toContain(`from="${encode(own.messagingSocketPath)}"`);
+    await f.transmit({ type: 'control', from: encode(f.peerPath), action: 'peer_message_status',
+      orig_msg_id: sent.messageId, status: 'delivered' });
+    await until(() => f.bridge.status().messages.some(message => message.id === sent.messageId && message.status === 'delivered'));
+  } finally { await f.close(); }
+});
+
+test('the outgoing envelope carries the native sender thread ID for session attribution', async () => {
+  const f = await fixture();
+  try {
+    await f.bridge.sendMessage(f.peerId, 'sender identity check');
+    const frame = f.frames.find(frame => frame.type === 'user');
+    expect(frame?.type === 'user' && frame.message.content).toContain(`from-session="${f.desktop.threadId}"`);
+  } finally { await f.close(); }
+});
+
+test('native receipt reasons remain visible in status while late receipts stay ignored', async () => {
+  const f = await fixture();
+  try {
+    const sent = await f.bridge.sendMessage(f.peerId, 'receipt detail check');
+    await f.transmit({ type: 'control', action: 'peer_message_status', orig_msg_id: sent.messageId,
+      status: 'held', reason: 'Permission-mode mismatch: held for approval.' });
+    await until(() => f.bridge.status().messages.some(message => message.id === sent.messageId && message.status === 'held'));
+    expect(f.bridge.status().messages.find(message => message.id === sent.messageId))
+      .toHaveProperty('status_reason', 'Permission-mode mismatch: held for approval.');
+    await f.transmit({ type: 'control', action: 'peer_message_status', orig_msg_id: sent.messageId,
+      status: 'denied', reason: 'The receiving user denied this message.' });
+    await until(() => f.bridge.status().messages.some(message => message.id === sent.messageId && message.status === 'denied'));
+    await f.transmit({ type: 'control', action: 'peer_message_status', orig_msg_id: sent.messageId,
+      status: 'held', reason: 'Late receipt.' });
+    await f.bridge.setPolicy('default');
+    expect(f.bridge.status().messages.find(message => message.id === sent.messageId))
+      .toMatchObject({ status: 'denied', status_reason: 'The receiving user denied this message.' });
+  } finally { await f.close(); }
+});
+
+test('delivered receipts mean a held message was released, ordinary acceptance sends none', async () => {
+  const f = await fixture();
+  try {
+    const direct = await f.message('prompting', 'ordinary acceptance');
+    await f.bridge.setPolicy('default');
+    expect(f.desktop.submissions).toHaveLength(1);
+    expect(f.frames.filter(frame => frame.type === 'control' && frame.action === 'peer_message_status' && frame.orig_msg_id === direct))
+      .toEqual([]);
+    const held = await f.message('bypass', 'approval release');
+    await until(() => f.frames.some(frame => frame.type === 'control' && frame.action === 'peer_message_status'
+      && frame.orig_msg_id === held && frame.status === 'held'));
+    await f.bridge.setPolicy('accept');
+    expect(f.desktop.submissions).toHaveLength(2);
+    expect(f.frames.some(frame => frame.type === 'control' && frame.action === 'peer_message_status'
+      && frame.orig_msg_id === held && frame.status === 'delivered')).toBe(true);
+  } finally { await f.close(); }
+});
+
+test('attachment messages are explicitly refused instead of delivering text with missing files', async () => {
+  const f = await fixture();
+  try {
+    const id = randomUUID();
+    await f.transmit({ type: 'user', msg_id: id, session_id: f.desktop.threadId,
+      message: { role: 'user', content: 'Review the attached file.' },
+      file_attachments: [{ path: '/tmp/transfer-spool/example.txt', file_name: 'example.txt', file_size: 12, sha256: '0'.repeat(64) }] });
+    await f.bridge.setPolicy('default');
+    expect(f.bridge.status().messages.find(message => message.id === id))
+      .toMatchObject({ status: 'refused', status_reason: 'File attachments are unsupported; send plain text or a shared filesystem path.' });
+    expect(f.desktop.submissions).toHaveLength(0);
+    expect(f.frames.some(frame => frame.type === 'control' && frame.action === 'peer_message_status'
+      && frame.orig_msg_id === id && frame.status === 'expired' && frame.status_detail === 'refused'
+      && frame.reason === 'File attachments are unsupported; send plain text or a shared filesystem path.')).toBe(true);
+    await f.transmit({ type: 'user', msg_id: randomUUID(), session_id: f.desktop.threadId,
+      message: { role: 'user', content: 'Plain text with an empty attachment list.' }, file_attachments: [] });
+    await f.bridge.setPolicy('default');
+    expect(f.desktop.submissions).toHaveLength(1);
+  } finally { await f.close(); }
+});
 
 test('MCP sends and receives a peer reply with a large task history', async () => {
   const f = await fixture();
@@ -395,7 +483,7 @@ test('the receiver refuses an exhausted outgoing burst before writing text or an
     if (!address) throw new Error('Missing receiver');
     const peer = findPeer(f.configDir, f.peerId);
     await sendFrames(f.configDir, peer, Array.from({ length: 30 }, (_, index) =>
-      userFrame(peer, address, f.bridge.status().name ?? 'codex', randomUUID(), `message ${index}`, 'prompting', null)));
+      userFrame(peer, address, f.bridge.status().name ?? 'codex', f.desktop.threadId, randomUUID(), `message ${index}`, 'prompting', null)));
     expect(f.frames).toHaveLength(30);
     await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(import.meta.dir, '../src/server.ts')],
       env: { ...process.env, CODEX_HOME: f.root, CLAUDE_CONFIG_DIR: f.configDir } }));
@@ -634,4 +722,72 @@ test('MCP cancellation leaves policy alone but denies a default-held message', a
     await client.close();
     await until(() => f.bridge.status().messages.find(row => row.id === deadlineMessage)?.status === 'expired');
   } finally { await client.close(); await f.close(); }
+});
+
+test('text frames with priority now or later are delivered like next', async () => {
+  const f = await fixture();
+  try {
+    for (const priority of ['now', 'later', 'next']) {
+      await f.transmit({ type: 'user', msg_id: randomUUID(), session_id: f.desktop.threadId, priority,
+        message: { role: 'user', content: `priority ${priority}` } });
+    }
+    await f.bridge.setPolicy('default');
+    await until(() => f.desktop.submissions.length === 3);
+  } finally { await f.close(); }
+});
+
+test('control frames addressed to another session are ignored, matching ones are applied', async () => {
+  const f = await fixture();
+  try {
+    const sent = await f.bridge.sendMessage(f.peerId, 'receipt target');
+    const receipt = { type: 'control', action: 'peer_message_status', orig_msg_id: sent.messageId, status: 'denied' };
+    await f.transmit({ ...receipt, session_id: randomUUID() });
+    await f.transmit({ type: 'control', action: 'notify_when_idle', msg_id: randomUUID(), session_id: randomUUID() });
+    await f.bridge.setPolicy('default');
+    expect(f.bridge.status().messages.find(message => message.id === sent.messageId)?.status).toBe('socket-written');
+    expect(f.bridge.status().idleRequests).toEqual([]);
+    await f.transmit({ ...receipt, session_id: f.desktop.threadId });
+    await until(() => f.bridge.status().messages.some(message => message.id === sent.messageId && message.status === 'denied'));
+  } finally { await f.close(); }
+});
+
+test('a peer that changes its sessionId keeps its receipts, idle notices and outgoing receipts', async () => {
+  const f = await fixture();
+  const cleared = randomUUID();
+  const clear = () => writeFileSync(join(f.configDir, 'sessions', `${process.ppid}.json`), JSON.stringify({
+    pid: process.ppid, sessionId: cleared, messagingSocketPath: f.peerPath, cwd: f.root, peerProtocol: 1,
+    peerFeatures: ['notify_idle'], startedAt: 1700000000000 }));
+  try {
+    const sent = await f.bridge.sendMessage(f.peerId, 'before clear', true);
+    const subscription = f.bridge.status().idleRequests[0]?.id;
+    if (!subscription) throw new Error('Missing subscription');
+    const held = await f.message('bypass', 'held before clear');
+    await until(() => f.frames.some(frame => frame.type === 'control' && frame.action === 'peer_message_status'
+      && frame.orig_msg_id === held && frame.status === 'held'));
+    clear();
+    await f.transmit({ type: 'control', action: 'peer_message_status', orig_msg_id: sent.messageId, status: 'denied' });
+    await until(() => f.bridge.status().messages.some(message => message.id === sent.messageId && message.status === 'denied'));
+    await f.transmit({ type: 'control', action: 'peer_idle_notice', orig_msg_id: subscription, state: 'idle' });
+    await until(() => f.bridge.status().idleRequests.some(request => request.id === subscription && request.status === 'received'));
+    await f.bridge.setPolicy('accept');
+    await until(() => f.frames.some(frame => frame.type === 'control' && frame.action === 'peer_message_status'
+      && frame.orig_msg_id === held && frame.status === 'delivered'));
+    expect(JSON.stringify(f.desktop.submissions)).toContain(cleared);
+  } finally { await f.close(); }
+});
+
+test('a leading auth line from a peer is ignored and the frame after it is delivered', async () => {
+  const f = await fixture();
+  try {
+    const path = peers(f.configDir).find(peer => peer.sessionId === f.desktop.threadId)?.messagingSocketPath;
+    if (!path) throw new Error('No receiver');
+    const socket = net.createConnection(path);
+    await once(socket, 'connect');
+    socket.end(JSON.stringify({ type: 'auth', token: '0123456789abcdef0123456789abcdef' }) + '\n'
+      + JSON.stringify({ msgV: 1, type: 'user', msg_id: randomUUID(), from: `uds:${f.peerPath}`, session_id: f.desktop.threadId,
+        message: { role: 'user', content: 'after auth' } }) + '\n');
+    await once(socket, 'close');
+    await f.bridge.setPolicy('default');
+    await until(() => f.desktop.submissions.length === 1);
+  } finally { await f.close(); }
 });

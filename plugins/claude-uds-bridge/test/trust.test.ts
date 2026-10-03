@@ -8,14 +8,14 @@ import { peers, processStart, sendFrames } from '../src/claude';
 
 // The local user is the trust boundary: a sender address is not an identity. These tests bend one
 // property of an otherwise valid peer and expect discovery or sending to reject it.
-async function fixture() {
+async function fixture(socketName = `${process.pid}.sock`) {
   const root = mkdtempSync('/tmp/uds-trust-');
   const configDir = join(root, 'claude');
   const sessions = join(configDir, 'sessions');
   const directory = join(root, 's');
   mkdirSync(sessions, { recursive: true, mode: 0o700 });
   mkdirSync(directory, { mode: 0o700 });
-  const socketPath = join(directory, `${process.pid}.sock`);
+  const socketPath = join(directory, socketName);
   const server = net.createServer(socket => socket.resume());
   server.listen(socketPath);
   await once(server, 'listening');
@@ -36,7 +36,7 @@ async function fixture() {
     } };
 }
 
-test('discovery drops a session record that disagrees with its own file name or socket', async () => {
+test('discovery drops a session record with a mismatched registry filename or missing socket', async () => {
   const f = await fixture();
   try {
     expect(f.peer()?.sessionId).toBe(f.sessionId);
@@ -46,8 +46,7 @@ test('discovery drops a session record that disagrees with its own file name or 
     expect(peers(f.configDir).map(peer => peer.sessionId)).toEqual([f.sessionId]);
     rmSync(join(f.sessions, '999999.json'));
 
-    // The socket has to belong to the process named by the record, so a stale or borrowed
-    // path cannot redirect messages to whoever listens there now.
+    // A missing socket makes the registration unreachable.
     f.write({ messagingSocketPath: join(f.sessions, '..', 's', 'somebody-else.sock') });
     expect(peers(f.configDir)).toEqual([]);
   } finally { await f.close(); }
@@ -64,6 +63,17 @@ test('sending refuses a peer socket that other users can reach', async () => {
     await expect(sendFrames(f.configDir, peer!, [f.frame])).rejects.toThrow('Invalid peer socket');
   } finally { await f.close(); }
 });
+
+test.each([`${process.pid}-f00d1234.sock`, 'abcdef0123456789.sock', 'custom socket%é.sock'])
+  ('discovery and sending honor a registered native alternate socket path: %s', async socketName => {
+    const f = await fixture(socketName);
+    try {
+      const peer = f.peer();
+      expect(peer?.sessionId).toBe(f.sessionId);
+      expect(peer?.messagingSocketPath).toBe(f.socketPath);
+      expect(await sendFrames(f.configDir, peer!, [f.frame])).toBe(true);
+    } finally { await f.close(); }
+  });
 
 test('sending refuses a peer whose process identity no longer matches', async () => {
   const f = await fixture();
