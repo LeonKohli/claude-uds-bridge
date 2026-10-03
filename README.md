@@ -2,88 +2,103 @@
 
 A Codex plugin that lets Codex tasks and Claude Code sessions message each other on one machine.
 
-Claude Code can already list its other sessions and send one of them a message by name. This plugin registers your Codex task in the same local registry, so Claude finds the task with `ListAgents` and writes to it with `SendMessage`. No handshake, no tool call first. From the Codex side, a bundled MCP server lists the live agents and sends to one of them.
-
-Messages travel over Unix domain sockets in a private per-user directory. Nothing reaches OpenAI or Anthropic servers.
+Claude Code lists and messages its other sessions through its own local registry. This plugin registers each Codex task in that registry, so Claude finds the task with `ListAgents` and writes to it with `SendMessage`. Claude needs no flags, plugins, or launchers. A bundled MCP server gives the Codex side `list_sessions` and `send_message`. Messages travel over Unix domain sockets in private per-user directories.
 
 ## Requirements
 
-- The Codex desktop app, running. Delivery goes through a task's IPC connection, so a CLI-only Codex has no inbox. This is the real platform constraint: the bridge runs wherever that app does.
-- macOS or Linux. The transport uses POSIX sockets, and CI runs the suite on both. Windows named pipes are not implemented.
+- Stock Codex with its shared local app-server daemon. CLI tasks on the daemon and desktop tasks it owns work. Older desktop tasks use the desktop IPC fallback. CLI sessions started with `--no-daemon` have no inbox. Real-runtime checks cover Codex 0.159.0, 0.159.2, and 0.159.3.
+- macOS or Linux.
 - Claude Code 2.1.224 or later, the first release with [cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging).
-- Bun on your `PATH`. The lifecycle hook and the MCP server both run under Bun.
+- Bun on your `PATH`.
 
 ## Install
-
-Add the marketplace, then install the plugin:
 
 ```bash
 codex plugin marketplace add LeonKohli/claude-uds-bridge
 codex plugin add claude-uds-bridge@leonkohli
 ```
 
-Codex ignores plugin hooks until you trust them. Open the plugin in Codex, review the two hooks, and confirm both. A task becomes reachable only when its `SessionStart` hook runs.
+To install from a local checkout, pass its path to `marketplace add` instead.
 
-Open a new Codex task after confirming. Tasks that were already open keep running without the hooks.
+Codex ignores plugin hooks until you trust them. Open the plugin in Codex, review the two hooks, and confirm both. Then open a new task. Tasks that were already open keep running without the hooks.
 
-To install from a local checkout, point the marketplace at the folder instead:
-
-```bash
-codex plugin marketplace add /path/to/claude-uds-bridge
-codex plugin add claude-uds-bridge@leonkohli
-```
+A task registers when its `SessionStart` hook runs, which Codex does on the first turn. A fresh chat with nothing typed stays invisible to Claude. See [STARTUP.md](plugins/claude-uds-bridge/STARTUP.md).
 
 ## Check that it works
 
-In the Codex task, ask for the bridge status. Codex calls the `status` tool and reports a `replyAddress`. A `null` address means the lifecycle hook did not run, so check the hook trust prompt first.
+In the Codex task, ask for the bridge status. The `status` tool reports a `replyAddress` and a `transport` of `app-server` or `desktop`. A `null` address means the receiver is inactive. Check hook trust and the hook result.
 
-In Claude Code, run `/list-agents`. The Codex task appears under a name built from its working directory, such as `codex-ccurio-c6`. Ask Claude to message it, and the text arrives in the Codex task.
+In Claude Code, run `/list-agents`. The task appears as `codex-<directory>-<suffix>`. Ask Claude to message it.
 
 ## How a message arrives
 
-An incoming message steers the Codex task's active turn, or starts a new turn when the task is idle. A running tool keeps going and is never interrupted. This matches Claude Code's own [delivery between tool calls](https://code.claude.com/docs/en/cross-session-messaging#message-delivery).
+A message steers the task's active turn, or starts a turn when the task is idle. A running tool is never interrupted. The bridge marks the text as peer input. It grants no approval, and the task's own permissions still apply.
 
-Peer text is marked as external input. It grants no user permission, and the receiving agent's own permissions still apply.
+```mermaid
+flowchart LR
+  subgraph claude["Claude Code session"]
+    cr["registry row<br/>sessions/PID.json"]
+    cs["inbox socket<br/>cc-socks/PID.sock"]
+  end
+  subgraph bridge["Bridge receiver, one per Codex task"]
+    br["registry row"]
+    bs["inbox socket"]
+    db[("SQLite inbox<br/>policy, limits, held")]
+  end
+  mcp["MCP server<br/>send_message"]
+  as["Codex app-server daemon"]
+  task["Codex task"]
+  cr -. "ListAgents reads" .-> br
+  cs -- "SendMessage: text frame" --> bs
+  bs --> db
+  db -- "turn/start + toolOutput" --> as
+  as --> task
+  task -- "tool call" --> mcp
+  mcp -- "outbound socket" --> bs
+  bs -- "text frame, receipts" --> cs
+```
 
-## Naming
+The app-server transport uses `turn/start` with `toolOutput`, which starts or joins a turn at tool authority. The bridge reads existing settings and leaves approval requests to your UI. If the observer connection drops, status and permissions are `unknown` while the bridge reconnects for up to 30 seconds. If recovery fails, the receiver exits. A lost delivery acknowledgement stays `unknown` and is never resent.
 
-Claude's `ListAgents` shows the model only the name of each agent, and `SendMessage` addresses by that name alone. The bridge therefore follows Claude Code's own default of `<directory>-<suffix>` and prefixes it with `codex-`. Codex builds a task folder from the opening prompt, so a long folder name keeps its first and last part, where the distinguishing words sit. When a live peer already holds the name, the bridge lengthens the suffix. The same name travels in the message envelope as `from-name`, so a reply reaches the task that sent it.
+`send_message` addresses a peer by `sessionId`, not by name. An ambiguous registration is refused.
 
-In the other direction, `send_message` addresses by `sessionId` rather than by name, and an ambiguous registration is refused instead of guessed.
+## Control what arrives
 
-## Controlling what arrives
-
-The receive setting belongs to one Codex task. On a permission-mode mismatch the bridge opens a native dialog, including between turns. Held text reaches the model only after you release it.
+The receive setting belongs to one task. When the permission modes of sender and receiver differ, a native dialog opens, also between turns. Held text reaches the model only after you release it.
 
 | Setting | Behavior |
 | --- | --- |
 | `default` | Accept a matching permission mode, hold a differing one. Without a sender mode, accept only `prompting`. |
-| `accept` | Receive messages and release the held ones. |
+| `accept` | Accept everything and release held messages. |
 | `hold` | Hold without expiry until an accepting setting applies or the session ends. |
 | `refuse` | Drop messages and discard idle subscriptions. |
 
-A message held by the mode comparison expires after five minutes by default. The `inbox` tool offers `60s`, `5m`, `10m`, and `never`. The sender receives Claude's status notices, including `held`, `delivered`, `denied`, and `expired`.
+A message held by the mode comparison expires after 5 minutes. You set the expiry to `60s`, `5m`, `10m`, or `never` in the `inbox` dialog.
+
+The sender sees Claude's status notices, among them `held`, `delivered`, `denied`, and `expired`. `delivered` means a held message was released. Ordinary acceptance sends no receipt. The `status` tool keeps Claude's explanation as `status_reason`.
 
 ## MCP tools
 
 | Tool | Use |
 | --- | --- |
-| `list_sessions` | List local agents with ID, name, kind, working directory, status, and start time, most recently started first. |
-| `send_message` | Send text to one agent by `sessionId`. Set `notify_when_idle` for one notice when that agent next goes idle. |
+| `list_sessions` | List local agents with ID, name, agent type, working directory, status, and start time. |
+| `send_message` | Send text to one agent. Set `notify_when_idle` for one notice when that agent next goes idle. |
 | `status` | Show the receiver and recent transport outcomes. |
-| `inbox` | Set the receive policy, set the hold expiry, or review the oldest held message. |
+| `inbox` | Open a dialog where you set the receive policy and hold expiry, or review the oldest held message. |
 
 ## Limits
 
-- A serialized message may reach 1,048,576 characters. The sender refuses anything larger before writing.
-- The sender refuses a message once a burst of 30 to one agent is exhausted. The budget grows by one message every two seconds.
-- At most 100 messages stay held, and at most 50 accepted messages wait for Codex to take them up.
-- `socket-written`, `started`, and `steered` report transport progress, not a model reply.
-- Idle subscriptions fire once and last at most twelve hours.
+- One message may reach 1,048,576 serialized characters. The sender refuses more before writing.
+- A burst of 30 messages to one agent exhausts the budget. It refills one message every two seconds.
+- At most 100 messages stay held and 50 accepted messages wait for Codex.
+- `socket-written`, `accepted`, `started`, and `steered` report transport progress. A model reply is a separate event.
+- Idle subscriptions fire once and last at most 12 hours.
+- The bridge refuses attachments and says why. Send a shared path as text.
 - The bridge does not lock files. Agree on file ownership before two agents edit one repository.
-- Delivery uses the internal Codex desktop IPC interface. An incompatible app version makes delivery fail as `unknown`.
+- App-server delivery uses the experimental `toolOutput` API. An incompatible runtime fails delivery; the bridge does not guess another protocol.
+- Codex has no loaded-only subscription. A task that closes between the bridge's loaded check and `thread/resume` can be resumed by the observer. Reads and delivery never resume tasks.
 
-[`plugins/claude-uds-bridge/PROTOCOL-COVERAGE.md`](plugins/claude-uds-bridge/PROTOCOL-COVERAGE.md) compares the implementation against Claude's documented behavior case by case, including the cases it does not cover.
+What is missing compared with Claude Code is in [PROTOCOL-COVERAGE.md](plugins/claude-uds-bridge/PROTOCOL-COVERAGE.md). How other Codex and MCP bridges differ is in [COMPARISON.md](plugins/claude-uds-bridge/COMPARISON.md).
 
 ## Development
 
@@ -93,11 +108,10 @@ bun install --frozen-lockfile
 bun run check
 bun test
 bun run build
+bun run test:native
 ```
 
-The plugin runs the bundled `dist/server.js` and `dist/hook.js`, so run `bun run build` after changing anything under `src/`. Dependencies are bundled, and no `node_modules` is needed at runtime.
-
-The Claude transport follows the [socket protocol documented by PeterSR](https://github.com/PeterSR/claude-code-socket-transport/tree/480bd83c0bf1c63161c5afdb0976bbff849c926b). Delivery into Codex uses `thread-follower-steer-turn` and `thread-follower-start-turn` on the existing task and confirms through the returned turn ID.
+The plugin runs the bundled `dist/server.js` and `dist/hook.js`, and CI fails when they lag `src/`. Run `bun run build` after changing `src/`. Set a new `version` in `package.json` and `.codex-plugin/plugin.json` for every release, because Codex caches an installed plugin by version. `bun run test:native` starts the installed Codex binary in a temporary home with a local model stub. See [Testing](plugins/claude-uds-bridge/PROTOCOL-COVERAGE.md#testing) for its modes and environment variables.
 
 ## License
 
