@@ -7,7 +7,8 @@
     "start": "bun src/server.ts",
     "build": "bun build src/server.ts src/hook.ts --target=bun --minify --outdir=dist",
     "check": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "test:native": "bun test/native.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
