@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { checkSocket, uuid } from './claude';
 import type { Runtime } from './desktop';
 import type { Inputs } from './desktop-input';
+import { version } from './version';
 
 const statusSchema = z.object({ type: z.string() });
 const threadSchema = z.object({ id: uuid, status: statusSchema, canAcceptDirectInput: z.boolean().nullable().optional() });
@@ -86,7 +87,7 @@ export class AppServer {
 
   async connect() {
     await once(this.socket, 'open', { signal: AbortSignal.timeout(5000) });
-    await this.request('initialize', { clientInfo: { name: 'claude-uds-bridge', version: '0.1.0' }, capabilities: { experimentalApi: true } });
+    await this.request('initialize', { clientInfo: { name: 'claude-uds-bridge', version }, capabilities: { experimentalApi: true } });
     this.socket.send(JSON.stringify({ method: 'initialized' }));
     const { thread } = z.object({ thread: threadSchema }).parse(await this.request('thread/read', { threadId: this.threadId }));
     if (thread.id !== this.threadId || thread.status.type === 'notLoaded' || thread.canAcceptDirectInput === false) {
