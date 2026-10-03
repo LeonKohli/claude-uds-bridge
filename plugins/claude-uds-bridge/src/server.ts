@@ -39,21 +39,24 @@ const server = new McpServer({ name: 'claude-uds-bridge', version: '0.1.0' }, { 
   + 'and other configuration as the user set them, and send work that is blocked here to the user instead of to a peer.\n'
   + 'Keep working after asking a peer something. The answer arrives in this turn or starts the next one.\n'
   + 'To hear when a peer finishes, set notify_when_idle once and carry on with other work.\n'
-  + 'socket-written, started and steered report transport progress. A model answer is a separate event, '
+  + 'socket-written, accepted, started and steered report transport progress. A model answer is a separate event, '
   + 'and an outcome that comes back unknown needs a status check before any resend.\n'
   + 'Answer a peer when it needs something from you.\n'
   + 'Settle who owns which files before two agents edit one repository. This plugin holds no locks.' });
 
-server.registerTool('session_start', { description: 'Bind the native SessionStart lifecycle hook and start the receiver.',
-  inputSchema: { cwd: z.string().refine(isAbsolute) }, _meta: { ui: { visibility: [] } } }, async ({ cwd }, extra) => {
-  const bridge = current(extra._meta);
+async function startReceiver(threadId: string, cwd: string) {
   const child = Bun.spawn([process.execPath, join(import.meta.dir, `hook${extname(import.meta.path)}`)],
     { stdin: 'pipe', stdout: 'ignore', stderr: 'pipe', env: process.env });
-  child.stdin.write(JSON.stringify({ session_id: bridge.threadId, cwd, hook_event_name: 'SessionStart' }));
+  child.stdin.write(JSON.stringify({ session_id: threadId, cwd, hook_event_name: 'SessionStart' }));
   child.stdin.end();
   const [code, error] = await Promise.all([child.exited, new Response(child.stderr).text()]);
   if (code !== 0) throw new Error(error.trim() || 'Session receiver hook failed');
   dialogs?.start();
+}
+
+server.registerTool('session_start', { description: 'Bind the native SessionStart lifecycle hook and start the receiver.',
+  inputSchema: { cwd: z.string().refine(isAbsolute) }, _meta: { ui: { visibility: [] } } }, async ({ cwd }, extra) => {
+  await startReceiver(current(extra._meta).threadId, cwd);
   return { content: [] };
 });
 
@@ -68,7 +71,7 @@ server.registerTool('list_sessions', { description: 'List the live local agents,
 server.registerTool('send_message', { description: 'Send text to one listed agent, or set notify_when_idle alone to subscribe without sending. Its answer enters the current Codex turn, or starts one when this task is idle. Batch what you have to say into one message: a rapid burst to the same agent is refused.',
   inputSchema: { sessionId: uuid, text: z.string().min(1).max(maxLineLength).optional(), notify_when_idle: z.boolean().default(false) }, annotations: { openWorldHint: true } },
   async ({ sessionId, text, notify_when_idle }, extra) => result(await current(extra._meta).sendMessage(sessionId, text, notify_when_idle)));
-server.registerTool('status', { description: 'Show this task receiver and its recent transport outcomes. A replyAddress of null means the lifecycle hook is not running, which the user fixes by trusting the plugin hooks. Read an unknown outcome here before deciding whether to resend.',
+server.registerTool('status', { description: 'Show this task receiver, selected transport, and recent transport outcomes. A replyAddress of null means the receiver is inactive; check hook trust and the startup hook result. Read an unknown outcome here before deciding whether to resend.',
   inputSchema: {}, annotations: { readOnlyHint: true, openWorldHint: false } },
   async (_args, extra) => result(current(extra._meta).status()));
 server.registerTool('inbox', { description: 'Open a dialog the user answers. Use view policy to set accept, hold, refuse or default, view expiry to set how long a held message waits, and view held to put the oldest held message in front of the user. Only that answer releases held input, and the held text stays out of your context either way.',

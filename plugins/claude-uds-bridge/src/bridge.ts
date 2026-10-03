@@ -3,7 +3,8 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { accountReceipt, findPeer, hopChain, inbox, peers, privateDirectory, processStart, register, SendRefused, sendFrames, senderMode, serializeFrame, userFrame, uuid, type Frame, type Peer } from './claude';
-import { deliverToDesktop, readDesktopInputs, readDesktopRuntime, type Runtime } from './desktop';
+import type { Runtime } from './desktop';
+import { deliverToCodex, readCodexInputs, readCodexRuntime, targetSchema, type Target } from './codex';
 import { z } from 'zod';
 import { outboundServer, refreshReceiver, sendViaReceiver } from './outbound';
 import { PeerGuard } from './guard';
@@ -41,6 +42,9 @@ export class Bridge {
       );
       CREATE TABLE IF NOT EXISTS lifecycle (
         singleton INTEGER PRIMARY KEY CHECK(singleton=1), generation TEXT NOT NULL, active INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS transport (
+        singleton INTEGER PRIMARY KEY CHECK(singleton=1), kind TEXT NOT NULL, path TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS runtime (
         singleton INTEGER PRIMARY KEY CHECK(singleton=1), status TEXT NOT NULL, mode TEXT NOT NULL
@@ -104,6 +108,16 @@ export class Bridge {
     this.db.run("UPDATE runtime SET status='unknown',mode='unknown' WHERE singleton=1");
     this.db.run('DELETE FROM peer_guard');
     return generation;
+  }
+
+  setTarget(target: Target) {
+    targetSchema.parse(target);
+    this.db.run('INSERT INTO transport VALUES (1,?,?) ON CONFLICT(singleton) DO UPDATE SET kind=excluded.kind,path=excluded.path', [target.kind, target.path]);
+  }
+
+  target(): Target {
+    const target = this.db.query<{ kind: string; path: string }, []>('SELECT kind,path FROM transport WHERE singleton=1').get();
+    return targetSchema.parse(target ?? { kind: 'desktop', path: this.ipcPath });
   }
 
   endSession() {
@@ -188,10 +202,13 @@ export class Bridge {
   }
 
   private async syncInputs() {
-    const inputs = await readDesktopInputs(this.ipcPath, this.threadId);
+    const awaiting = this.db.query<{ desktop_input_id: string | null }, []>(
+      "SELECT desktop_input_id FROM messages WHERE direction='in' AND awaiting_input=1").all()
+      .flatMap(message => message.desktop_input_id ? [message.desktop_input_id] : []);
+    const inputs = await readCodexInputs(this.target(), this.threadId, awaiting);
     this.db.transaction(() => {
       for (const input of inputs.consumed) this.db.run(
-        "UPDATE messages SET awaiting_input=0,native_input_id=? WHERE direction='in' AND (desktop_input_id=? OR native_input_id=?) AND status IN ('submitting','started','steered','unknown')",
+        "UPDATE messages SET awaiting_input=0,native_input_id=? WHERE direction='in' AND (desktop_input_id=? OR native_input_id=?) AND status IN ('submitting','started','steered','accepted','unknown')",
         [input.id, input.clientId, input.id]);
     })();
     return inputs;
@@ -497,7 +514,7 @@ export class Bridge {
     const pending = this.db.query<Subscription, [number]>("SELECT * FROM idle_requests WHERE direction='in' AND status='waiting' AND expires_at>?").all(Date.now());
     if (!pending.length) return;
     await this.syncInputs();
-    if (this.unreadCount() || (await readDesktopRuntime(this.ipcPath, this.threadId)).status !== 'idle') return;
+    if (this.unreadCount() || (await readCodexRuntime(this.target(), this.threadId)).status !== 'idle') return;
     for (const subscription of pending) {
       if (!this.db.run("UPDATE idle_requests SET status='submitting' WHERE id=? AND status='waiting'", [subscription.id]).changes) continue;
       try {
@@ -548,7 +565,7 @@ export class Bridge {
       }
     }
     try {
-      const result = await deliverToDesktop(this.ipcPath, this.threadId, inputId, text);
+      const result = await deliverToCodex(this.target(), this.threadId, inputId, text);
       this.db.run('UPDATE messages SET status=?,turn_id=? WHERE id=?', [result.status, result.turnId, message.id]);
       await this.receipt(message, 'delivered');
     } catch {
@@ -559,6 +576,7 @@ export class Bridge {
   status() {
     const receiver = peers(this.configDir).find(peer => peer.sessionId === this.threadId && peer.entrypoint === 'codex-claude-uds-bridge');
     return { threadId: this.threadId, name: receiver?.name ?? null, replyAddress: receiver ? `uds:${receiver.messagingSocketPath}` : null,
+      transport: this.target().kind,
       runtime: this.runtime(),
       inboundPolicy: this.policy(), dialogExpiry: this.dialogExpiry(), heldCount: this.held().length, unreadCount: this.unreadCount(),
       idleRequests: this.db.query<Pick<Subscription, 'id' | 'peer_id' | 'direction'> & { status: string }, [number]>(

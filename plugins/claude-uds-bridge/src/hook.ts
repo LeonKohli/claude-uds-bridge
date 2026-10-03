@@ -5,7 +5,7 @@ import { mkdirSync } from 'node:fs';
 import { z } from 'zod';
 import { Bridge } from './bridge';
 import { peers, privateDirectory, processStart, uuid } from './claude';
-import { watchDesktop } from './desktop';
+import { discoverTarget, watchCodex } from './codex';
 
 const eventSchema = z.object({ session_id: uuid, cwd: z.string().refine(isAbsolute),
   hook_event_name: z.enum(['SessionStart', 'SessionEnd']), generation: uuid.optional() });
@@ -37,7 +37,8 @@ async function runReceiver() {
   process.once('SIGINT', () => { void close(); });
   process.once('disconnect', () => { if (!ready) void close(); });
   try {
-    unwatch = await watchDesktop(ipcPath, event.session_id, state => bridge.updateRuntime(state), () => { void close(); });
+    bridge.setTarget(await discoverTarget(ipcPath, event.session_id));
+    unwatch = await watchCodex(bridge.target(), event.session_id, state => bridge.updateRuntime(state), () => { void close(); });
     const livePeer = peers(configDir)[0];
     let directory = livePeer ? dirname(livePeer.messagingSocketPath)
       : join(process.env.XDG_RUNTIME_DIR ?? process.env.CLAUDE_CODE_TMPDIR ?? '/tmp', 'cc-socks');
@@ -51,7 +52,7 @@ async function runReceiver() {
       privateDirectory(directory);
     }
     await bridge.start(directory, event.cwd, uuid.parse(event.generation));
-    if (closing) throw new Error('Desktop closed during receiver startup');
+    if (closing) throw new Error('Codex disconnected during receiver startup');
     if (!process.connected) throw new Error('Session starter disconnected before readiness');
     ready = true;
     process.send?.({ ready: true }, error => { if (error) void close(); });
