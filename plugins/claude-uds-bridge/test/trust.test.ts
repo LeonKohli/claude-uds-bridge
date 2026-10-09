@@ -86,3 +86,10 @@ test('sending refuses a peer whose process identity no longer matches', async ()
     await expect(sendFrames(f.configDir, peer!, [f.frame])).rejects.toThrow('Peer process identity changed');
   } finally { await f.close(); }
 });
+
+test('processStart matches the start time Claude Code records on Linux', async () => {
+  if (process.platform !== 'linux') return;
+  const field22 = (await Bun.file(`/proc/${process.pid}/stat`).text()).split(') ').pop()!.split(' ')[19]!;
+  expect(await processStart(process.pid)).toBe(field22);
+  expect(await processStart(process.pid)).toMatch(/^[0-9]+$/);
+});
