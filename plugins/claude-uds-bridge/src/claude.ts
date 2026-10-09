@@ -108,6 +108,12 @@ export function findPeerProcess(configDir: string, address: string, procStart: s
 }
 
 export async function processStart(pid: number) {
+  if (process.platform === 'linux') {
+    // Claude Code on Linux records the kernel start time (field 22 of /proc/<pid>/stat), not `ps lstart`.
+    const start = readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').pop()?.split(' ')[19];
+    if (!start) throw new Error('Cannot verify receiver process');
+    return start;
+  }
   const child = Bun.spawn(['ps', '-o', 'lstart=', '-p', String(pid)],
     { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, stdout: 'pipe', stderr: 'ignore' });
   const [code, output] = await Promise.all([child.exited, new Response(child.stdout).text()]);
