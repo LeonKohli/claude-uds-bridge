@@ -107,8 +107,10 @@ export function findPeerProcess(configDir: string, address: string, procStart: s
   return matches[0]!;
 }
 
-export async function processStart(pid: number) {
-  if (process.platform === 'linux') {
+// Match the representation persisted by the registering version. New Linux registrations use
+// kernel ticks; pre-upgrade receivers retain their ps timestamp until they exit.
+export async function processStart(pid: number, recordedStart?: string) {
+  if (process.platform === 'linux' && (recordedStart === undefined || /^[0-9]+$/.test(recordedStart))) {
     // Claude Code on Linux records the kernel start time (field 22 of /proc/<pid>/stat), not `ps lstart`.
     const start = readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ').pop()?.split(' ')[19];
     if (!start) throw new Error('Cannot verify receiver process');
@@ -243,7 +245,7 @@ export async function sendFrames(configDir: string, peer: Peer, frames: unknown[
   }
   let written = false;
   try {
-    if (peer.procStart && await processStart(peer.pid) !== peer.procStart) throw new Error('Peer process identity changed; list sessions again');
+    if (peer.procStart && await processStart(peer.pid, peer.procStart) !== peer.procStart) throw new Error('Peer process identity changed; list sessions again');
     checkSocket(peer.messagingSocketPath);
     const hash = createHash('sha256').update(peer.messagingSocketPath).digest('hex');
     const keyPath = join(configDir, 'sessions', `${peer.pid}.${hash}.key`);
