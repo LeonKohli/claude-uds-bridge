@@ -809,7 +809,7 @@ test.each(['numeric', 'legacy'])('receiving verifies %s sender identities and re
     const stale = format === 'numeric' ? String(BigInt(start) + 1n) : 'Thu Jan  1 00:00:00 2026';
     writeFileSync(path, JSON.stringify({ ...record, procStart: stale }));
     const rejected = await f.message();
-    await expect(f.bridge.sendMessage(f.peerId, 'stale peer')).rejects.toThrow('Peer process identity changed');
+    await expect(f.bridge.sendMessage(f.peerId, 'stale peer')).rejects.toThrow('Send outcome unknown');
     expect(f.bridge.status().messages.some(message => message.id === rejected)).toBe(false);
   } finally { await f.close(); }
 });
