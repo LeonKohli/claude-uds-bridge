@@ -143,7 +143,7 @@ export class Bridge {
           if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error;
           alive = false;
         }
-        if (alive && await processStart(old.pid) === old.proc_start) throw new Error('Receiver is already starting or running');
+        if (alive && await processStart(old.pid, old.proc_start) === old.proc_start) throw new Error('Receiver is already starting or running');
       }
       const procStart = await processStart(process.pid);
       this.db.transaction(() => {
@@ -286,7 +286,7 @@ export class Bridge {
     const peer = peers(this.configDir).find(peer => peer.sessionId !== this.threadId
       && frame.from === peerAddress(peer.messagingSocketPath));
     if (!peer) return;
-    if (peer.procStart && await processStart(peer.pid) !== peer.procStart) return;
+    if (peer.procStart && await processStart(peer.pid, peer.procStart) !== peer.procStart) return;
     if (frame.session_id && frame.session_id !== this.threadId) return;
     if (frame.type === 'control') {
       if (frame.action === 'peer_message_status') {
