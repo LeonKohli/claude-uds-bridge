@@ -9,7 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { z } from 'zod';
 import { Bridge } from '../src/bridge';
-import { peers } from '../src/claude';
+import { peers, processStart } from '../src/claude';
 import { Database } from 'bun:sqlite';
 
 test('MCP binds state to caller metadata and rejects a different task', async () => {
@@ -115,4 +115,22 @@ test('registered peers can initiate contact; unknown senders and wrong targets a
     await new Promise<void>(resolve => peer.close(() => resolve()));
     rmSync(root, { recursive: true });
   }
+});
+
+test.each(['numeric', 'legacy'])('startup preserves a live %s receiver claim', async format => {
+  if (format === 'numeric' && process.platform !== 'linux') return;
+  const root = mkdtempSync('/tmp/uds-owner-');
+  const threadId = randomUUID();
+  const bridge = new Bridge(threadId, root, root, join(root, 'unavailable.sock'));
+  const db = new Database(join(root, `${threadId}.sqlite`));
+  try {
+    const child = Bun.spawn(['ps', '-o', 'lstart=', '-p', String(process.pid)],
+      { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, stdout: 'pipe' });
+    const legacy = (await new Response(child.stdout).text()).trim();
+    expect(await child.exited).toBe(0);
+    const start = format === 'numeric' ? await processStart(process.pid) : legacy;
+    db.run('INSERT INTO receiver VALUES (1,?,?)', [process.pid, start]);
+    await expect(bridge.start(root, root, bridge.beginSession())).rejects.toThrow('Receiver is already starting or running');
+    expect(db.query('SELECT proc_start FROM receiver').get()).toEqual({ proc_start: start });
+  } finally { db.close(); await bridge.close(); rmSync(root, { recursive: true }); }
 });
