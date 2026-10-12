@@ -74,7 +74,7 @@ async function runHook() {
         if (error instanceof Error && 'code' in error && error.code === 'ESRCH') return;
         throw error;
       }
-      if (await processStart(owner.pid) !== owner.proc_start) return;
+      if (await processStart(owner.pid, owner.proc_start) !== owner.proc_start) return;
       process.kill(owner.pid, 'SIGTERM');
       const deadline = Date.now() + 2000;
       while (receiver() && Date.now() < deadline) await Bun.sleep(25);
@@ -83,7 +83,7 @@ async function runHook() {
     }
     const active = receiver();
     if (active) {
-      if (!active.procStart || await processStart(active.pid) !== active.procStart) throw new Error('Receiver process identity changed');
+      if (!active.procStart || await processStart(active.pid, active.procStart) !== active.procStart) throw new Error('Receiver process identity changed');
       return;
     }
     await launchReceiver(state.beginSession());

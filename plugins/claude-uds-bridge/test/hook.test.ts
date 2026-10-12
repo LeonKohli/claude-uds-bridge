@@ -1,9 +1,10 @@
 import { test, expect } from 'bun:test';
-import { mkdtempSync, mkdirSync, chmodSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, chmodSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { once } from 'node:events';
+import { Database } from 'bun:sqlite';
 import { peers } from '../src/claude';
 
 test('session hooks own one receiver per task, restore it after resume and clean up on Desktop disconnect', async () => {
@@ -77,9 +78,22 @@ test('session hooks own one receiver per task, restore it after resume and clean
     expect(first).toBeDefined();
     expect(first?.cwd).toBe(root);
     expect(first?.messagingSocketPath).toStartWith(`/tmp/cc-socks-${process.getuid?.()}/`);
+    if (process.platform === 'linux') {
+      const child = Bun.spawn(['ps', '-o', 'lstart=', '-p', String(first!.pid)],
+        { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, stdout: 'pipe' });
+      const legacy = (await new Response(child.stdout).text()).trim();
+      expect(await child.exited).toBe(0);
+      writeFileSync(join(configDir, 'sessions', `${first!.pid}.json`), JSON.stringify({ ...first, procStart: legacy }));
+      const db = new Database(join(codexHome, 'plugin-state', 'claude-uds-bridge', `${threadId}.sqlite`));
+      db.run('UPDATE receiver SET proc_start=?', [legacy]);
+      db.close();
+    }
     await hook(threadId, 'SessionStart');
     expect(live(threadId)).toHaveLength(1);
     expect(live(threadId)[0]?.pid).toBe(first?.pid);
+    // Restore this new receiver's own registration before its integrity-checked cleanup.
+    // The stored ownership claim remains legacy so SessionEnd must verify the old format.
+    writeFileSync(join(configDir, 'sessions', `${first!.pid}.json`), JSON.stringify(first));
     await hook(otherId, 'SessionStart');
     expect(live(otherId)).toHaveLength(1);
     await hook(threadId, 'SessionEnd');

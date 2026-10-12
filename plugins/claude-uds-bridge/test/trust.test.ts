@@ -86,3 +86,33 @@ test('sending refuses a peer whose process identity no longer matches', async ()
     await expect(sendFrames(f.configDir, peer!, [f.frame])).rejects.toThrow('Peer process identity changed');
   } finally { await f.close(); }
 });
+
+test('processStart matches the start time Claude Code records on Linux', async () => {
+  if (process.platform !== 'linux') return;
+  const field22 = (await Bun.file(`/proc/${process.pid}/stat`).text()).split(') ').pop()!.split(' ')[19]!;
+  expect(await processStart(process.pid)).toBe(field22);
+  expect(await processStart(process.pid)).toMatch(/^[0-9]+$/);
+});
+
+// Ask ps independently so this exercises the exact representation older versions persisted.
+async function legacyStart(pid: number) {
+  const child = Bun.spawn(['ps', '-o', 'lstart=', '-p', String(pid)],
+    { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, stdout: 'pipe' });
+  const output = await new Response(child.stdout).text();
+  expect(await child.exited).toBe(0);
+  return output.trim();
+}
+
+test.each(['numeric', 'legacy'])('sending verifies %s process identities and rejects PID reuse', async format => {
+  if (format === 'numeric' && process.platform !== 'linux') return;
+  const f = await fixture();
+  try {
+    const start = format === 'numeric' ? await processStart(process.pid) : await legacyStart(process.pid);
+    expect(await processStart(process.pid, start)).toBe(start);
+    f.write({ procStart: start });
+    expect(await sendFrames(f.configDir, f.peer()!, [f.frame])).toBe(true);
+    const stale = format === 'numeric' ? String(BigInt(start) + 1n) : 'Thu Jan  1 00:00:00 2026';
+    f.write({ procStart: stale });
+    await expect(sendFrames(f.configDir, f.peer()!, [f.frame])).rejects.toThrow('Peer process identity changed');
+  } finally { await f.close(); }
+});

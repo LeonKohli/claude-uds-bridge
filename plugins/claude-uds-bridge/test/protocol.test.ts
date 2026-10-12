@@ -10,7 +10,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { CancelledNotificationSchema, ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { Bridge } from '../src/bridge';
-import { findPeer, frameSchema, hopChain, maxLineLength, peers, sendFrames, sessionName, userFrame } from '../src/claude';
+import { processStart, findPeer, frameSchema, hopChain, maxLineLength, peers, sendFrames, sessionName, userFrame } from '../src/claude';
 import { receiver } from './desktop-fixture';
 
 async function fixture(prefix = '/tmp/uds-protocol-') {
@@ -789,5 +789,27 @@ test('a leading auth line from a peer is ignored and the frame after it is deliv
     await once(socket, 'close');
     await f.bridge.setPolicy('default');
     await until(() => f.desktop.submissions.length === 1);
+  } finally { await f.close(); }
+});
+
+test.each(['numeric', 'legacy'])('receiving verifies %s sender identities and rejects PID reuse', async format => {
+  if (format === 'numeric' && process.platform !== 'linux') return;
+  const f = await fixture();
+  try {
+    const child = Bun.spawn(['ps', '-o', 'lstart=', '-p', String(process.ppid)],
+      { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' }, stdout: 'pipe' });
+    const legacy = (await new Response(child.stdout).text()).trim();
+    expect(await child.exited).toBe(0);
+    const start = format === 'numeric' ? await processStart(process.ppid) : legacy;
+    const path = join(f.configDir, 'sessions', `${process.ppid}.json`);
+    const record = await Bun.file(path).json();
+    writeFileSync(path, JSON.stringify({ ...record, procStart: start }));
+    const id = await f.message();
+    await until(() => f.bridge.status().messages.some(message => message.id === id));
+    const stale = format === 'numeric' ? String(BigInt(start) + 1n) : 'Thu Jan  1 00:00:00 2026';
+    writeFileSync(path, JSON.stringify({ ...record, procStart: stale }));
+    const rejected = await f.message();
+    await expect(f.bridge.sendMessage(f.peerId, 'stale peer')).rejects.toThrow('Send outcome unknown');
+    expect(f.bridge.status().messages.some(message => message.id === rejected)).toBe(false);
   } finally { await f.close(); }
 });
