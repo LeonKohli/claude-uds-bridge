@@ -91,6 +91,9 @@ test('session hooks own one receiver per task, restore it after resume and clean
     await hook(threadId, 'SessionStart');
     expect(live(threadId)).toHaveLength(1);
     expect(live(threadId)[0]?.pid).toBe(first?.pid);
+    // Restore this new receiver's own registration before its integrity-checked cleanup.
+    // The stored ownership claim remains legacy so SessionEnd must verify the old format.
+    writeFileSync(join(configDir, 'sessions', `${first!.pid}.json`), JSON.stringify(first));
     await hook(otherId, 'SessionStart');
     expect(live(otherId)).toHaveLength(1);
     await hook(threadId, 'SessionEnd');
