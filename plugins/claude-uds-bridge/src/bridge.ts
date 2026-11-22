@@ -87,8 +87,10 @@ export class Bridge {
     if (!this.db.query<{ name: string }, []>('PRAGMA table_info(runtime)').all().some(column => column.name === 'updated_at')) {
       this.db.exec('ALTER TABLE runtime ADD COLUMN updated_at INTEGER');
     }
-    if (!this.db.query<{ name: string }, []>('PRAGMA table_info(runtime)').all().some(column => column.name === 'hop_token')) {
-      this.db.exec('ALTER TABLE runtime ADD COLUMN hop_token TEXT');
+    for (const name of ['hop_token', 'receiver_error']) {
+      if (!this.db.query<{ name: string }, []>('PRAGMA table_info(runtime)').all().some(column => column.name === name)) {
+        this.db.exec(`ALTER TABLE runtime ADD COLUMN ${name} TEXT`);
+      }
     }
     this.guard = new PeerGuard(this.db);
     if (!this.db.query<{ name: string }, []>('PRAGMA table_info(inbound_policy)').all().some(column => column.name === 'dialog_expiry')) {
@@ -107,9 +109,18 @@ export class Bridge {
     this.db.run('INSERT INTO lifecycle VALUES (1,?,1) ON CONFLICT(singleton) DO UPDATE SET generation=excluded.generation, active=1', [generation]);
     this.db.run("UPDATE messages SET status='expired' WHERE status='held'");
     this.db.run("UPDATE idle_requests SET status='expired' WHERE status IN ('waiting','submitting','unknown')");
-    this.db.run("UPDATE runtime SET status='unknown',mode='unknown' WHERE singleton=1");
+    this.db.run("UPDATE runtime SET status='unknown',mode='unknown',receiver_error=NULL WHERE singleton=1");
     this.db.run('DELETE FROM peer_guard');
     return generation;
+  }
+
+  // Codex Desktop may not show a failed SessionStart hook result, so status and send errors repeat the reason.
+  recordReceiverError(error: unknown) {
+    this.db.run('UPDATE runtime SET receiver_error=? WHERE singleton=1', [error instanceof Error ? error.message : 'Receiver failed']);
+  }
+
+  private receiverError() {
+    return this.db.query<{ receiver_error: string | null }, []>('SELECT receiver_error FROM runtime WHERE singleton=1').get()?.receiver_error ?? null;
   }
 
   setTarget(target: Target) {
@@ -232,10 +243,11 @@ export class Bridge {
   private receiver() {
     const matches = peers(this.configDir).filter(peer => peer.sessionId === this.threadId);
     const receiver = matches[0];
-    if (matches.length !== 1 || receiver?.entrypoint !== 'codex-claude-uds-bridge') {
-      throw new Error('This Codex task has no active receiver or has conflicting registrations; reopen the task to run its SessionStart hook');
-    }
-    return receiver;
+    if (matches.length === 1 && receiver?.entrypoint === 'codex-claude-uds-bridge') return receiver;
+    if (matches.length) throw new Error(`${matches.length} live registrations claim this Codex task's session ID; no message was sent`);
+    const error = this.receiverError();
+    throw new Error(error ? `This Codex task's receiver is not running: ${error}; no message was sent`
+      : 'This Codex task has no receiver because its SessionStart hook has not run or is not trusted; no message was sent');
   }
 
   sendMessage(sessionId: string, text?: string, notifyWhenIdle = false) {
@@ -595,7 +607,7 @@ export class Bridge {
   status() {
     const receiver = peers(this.configDir).find(peer => peer.sessionId === this.threadId && peer.entrypoint === 'codex-claude-uds-bridge');
     return { threadId: this.threadId, name: receiver?.name ?? null, replyAddress: receiver ? peerAddress(receiver.messagingSocketPath) : null,
-      transport: this.target().kind,
+      receiverError: receiver ? null : this.receiverError(), transport: this.target().kind,
       runtime: this.runtime(),
       inboundPolicy: this.policy(), dialogExpiry: this.dialogExpiry(), heldCount: this.held().length, unreadCount: this.unreadCount(),
       idleRequests: this.db.query<Pick<Subscription, 'id' | 'peer_id' | 'direction'> & { status: string }, [number]>(

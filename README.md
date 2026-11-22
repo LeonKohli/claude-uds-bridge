@@ -6,7 +6,7 @@ Claude Code lists and messages its other sessions through its own local registry
 
 ## Requirements
 
-- Stock Codex with its shared local app-server daemon. CLI tasks on the daemon and desktop tasks it owns work. Older desktop tasks use the desktop IPC fallback. CLI sessions started with `--no-daemon` have no inbox. Real-runtime checks cover Codex 0.159.0, 0.159.2, and 0.159.3.
+- Stock Codex with its shared local app-server daemon. CLI tasks on the daemon and desktop tasks it owns work. Older desktop tasks use the desktop IPC fallback, which covers Codex Desktop through 26.1105. Builds 26.1106 to 26.1112 changed its stream format, and from 26.1117 on Codex Desktop runs its tasks in a private app-server that a plugin cannot reach, so those tasks have no inbox. CLI sessions started with `--no-daemon` have no inbox. Real-runtime checks cover Codex 0.159.0, 0.159.2, 0.159.3, and 0.171.0.
 - macOS or Linux.
 - Claude Code 2.1.224 or later, the first release with [cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging).
 - Bun on the `PATH` that Codex inherits. Without it, Codex tasks still start, but without the bridge.
@@ -28,7 +28,7 @@ A task registers when its `SessionStart` hook runs, which Codex does on the firs
 
 ## Check that it works
 
-In the Codex task, ask for the bridge status. The `status` tool reports a `replyAddress` and a `transport` of `app-server` or `desktop`. A `null` address means the receiver is inactive. Check hook trust and the hook result.
+In the Codex task, ask for the bridge status. The `status` tool reports a `replyAddress` and a `transport` of `app-server` or `desktop`. A `null` address means the receiver is inactive, and `receiverError` gives the reason when the receiver failed to start or lost its connection to Codex. Without a reason, the hooks are untrusted or have not run yet.
 
 In Claude Code, run `/list-agents`. The task appears as `codex-<directory>-<suffix>`. Ask Claude to message it.
 

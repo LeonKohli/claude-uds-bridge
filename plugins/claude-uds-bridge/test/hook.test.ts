@@ -6,6 +6,7 @@ import net from 'node:net';
 import { once } from 'node:events';
 import { Database } from 'bun:sqlite';
 import { peers } from '../src/claude';
+import { Bridge } from '../src/bridge';
 
 test('session hooks own one receiver per task, restore it after resume and clean up on Desktop disconnect', async () => {
   const root = mkdtempSync('/tmp/uds-life-');
@@ -115,6 +116,9 @@ test('session hooks own one receiver per task, restore it after resume and clean
     while (peers(configDir).length > 0 && Date.now() < deadline) await Bun.sleep(10);
     expect(peers(configDir)).toHaveLength(0);
     expect(existsSync(resumed!.messagingSocketPath)).toBe(false);
+    const closed = new Bridge(threadId, configDir, join(codexHome, 'plugin-state', 'claude-uds-bridge'), ipcPath);
+    expect(closed.status().receiverError).toBe('Codex closed the connection to this task');
+    await closed.close();
 
     pauseHandshake = true;
     const racingId = randomUUID();
@@ -132,3 +136,33 @@ test('session hooks own one receiver per task, restore it after resume and clean
     rmSync(root, { recursive: true });
   }
 }, 15000);
+
+test('a receiver that cannot reach Codex reports why in status and in send errors', async () => {
+  const root = mkdtempSync('/tmp/uds-refused-');
+  const codexHome = join(root, 'codex');
+  const configDir = join(root, 'claude');
+  mkdirSync(join(codexHome, 'ipc'), { recursive: true, mode: 0o700 });
+  mkdirSync(join(configDir, 'sessions'), { recursive: true, mode: 0o700 });
+  const ipcPath = join(codexHome, 'ipc', 'ipc.sock');
+  // A killed listener leaves its socket file behind, like the ipc.sock that Desktop 26.1117 no longer serves.
+  const listener = Bun.spawn([process.execPath, '-e', `require('node:net').createServer().listen(${JSON.stringify(ipcPath)}, () => process.kill(process.pid, 'SIGKILL'))`]);
+  await listener.exited;
+  chmodSync(ipcPath, 0o600);
+  const threadId = randomUUID();
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, '../src/hook.ts')], {
+    env: { ...process.env, CODEX_HOME: codexHome, CLAUDE_CONFIG_DIR: configDir }, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+  child.stdin.write(JSON.stringify({ session_id: threadId, cwd: root, hook_event_name: 'SessionStart' }));
+  child.stdin.end();
+  const [code, err] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  const bridge = new Bridge(threadId, configDir, join(codexHome, 'plugin-state', 'claude-uds-bridge'), ipcPath);
+  try {
+    expect(code).toBe(1);
+    expect(err).toContain(`Nothing serves Codex Desktop IPC at ${ipcPath}`);
+    expect(bridge.status()).toMatchObject({ replyAddress: null, receiverError: expect.stringContaining(`Nothing serves Codex Desktop IPC at ${ipcPath}`) });
+    writeFileSync(join(configDir, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: randomUUID(),
+      messagingSocketPath: ipcPath, cwd: root, peerProtocol: 1 }));
+    const peer = peers(configDir)[0];
+    if (!peer) throw new Error('Missing test peer');
+    await expect(bridge.sendMessage(peer.sessionId, 'never sent')).rejects.toThrow(/receiver is not running: Nothing serves Codex Desktop IPC .*; no message was sent/);
+  } finally { await bridge.close(); rmSync(root, { recursive: true }); }
+});

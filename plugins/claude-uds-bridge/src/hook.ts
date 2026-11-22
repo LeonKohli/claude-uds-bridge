@@ -38,7 +38,10 @@ async function runReceiver() {
   process.once('disconnect', () => { if (!ready) void close(); });
   try {
     bridge.setTarget(await discoverTarget(ipcPath, event.session_id));
-    unwatch = await watchCodex(bridge.target(), event.session_id, state => bridge.updateRuntime(state), () => { void close(); });
+    unwatch = await watchCodex(bridge.target(), event.session_id, state => bridge.updateRuntime(state), () => {
+      if (ready) bridge.recordReceiverError(new Error('Codex closed the connection to this task'));
+      void close();
+    });
     const livePeer = peers(configDir)[0];
     let directory = livePeer ? dirname(livePeer.messagingSocketPath)
       : join(process.env.XDG_RUNTIME_DIR ?? process.env.CLAUDE_CODE_TMPDIR ?? '/tmp', 'cc-socks');
@@ -86,7 +89,8 @@ async function runHook() {
       if (!active.procStart || await processStart(active.pid, active.procStart) !== active.procStart) throw new Error('Receiver process identity changed');
       return;
     }
-    await launchReceiver(state.beginSession());
+    try { await launchReceiver(state.beginSession()); }
+    catch (error) { state.recordReceiverError(error); throw error; }
   } finally { await state.close(); }
 }
 
