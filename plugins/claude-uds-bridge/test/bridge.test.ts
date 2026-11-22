@@ -83,7 +83,7 @@ test('registered peers can initiate contact; unknown senders and wrong targets a
   };
   try {
     await expect(bridge.sendMessage(sessionId, 'must not send without a reply address'))
-      .rejects.toThrow('This Codex task has no active receiver');
+      .rejects.toThrow('SessionStart hook has not run or is not trusted; no message was sent');
     expect(received).toEqual([]);
     expect(bridge.status().messages).toEqual([]);
     await bridge.start(directory, root, bridge.beginSession());

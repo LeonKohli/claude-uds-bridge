@@ -28,6 +28,13 @@ const acceptedSchema = z.object({ result: z.union([
 
 class Rejected extends Error {}
 
+// Desktop 26.1117 dropped this IPC server, so a missing or refused socket gets a reason the user can act on.
+function unreachable(error: unknown, path: string) {
+  if (!(error instanceof Error && 'code' in error && ['ENOENT', 'ECONNREFUSED'].includes(String(error.code)))) return error;
+  return new Error(`Nothing serves Codex Desktop IPC at ${path}, and the app-server daemon does not own this task. `
+    + 'Codex Desktop 26.1117 and later keep their tasks in a private app-server that plugins cannot reach', { cause: error });
+}
+
 function permissionMode(permissions: Snapshot['currentPermissions']): Runtime['mode'] {
   if (!permissions) return 'unknown';
   if (permissions.approvalPolicy !== 'never') return 'prompting';
@@ -52,8 +59,8 @@ class DesktopConnection {
   private refreshing = false;
   private dirty = false;
 
-  constructor(path: string, readonly threadId: string, onDisconnect?: () => void) {
-    checkSocket(path);
+  constructor(private readonly path: string, readonly threadId: string, onDisconnect?: () => void) {
+    try { checkSocket(path); } catch (error) { throw unreachable(error, path); }
     this.socket = net.createConnection(path);
     this.socket.on('data', chunk => this.read(typeof chunk === 'string' ? Buffer.from(chunk) : chunk));
     this.socket.on('error', error => this.fail(error));
@@ -70,7 +77,8 @@ class DesktopConnection {
   }
 
   async connectHost() {
-    await once(this.socket, 'connect', { signal: AbortSignal.timeout(5000) });
+    try { await once(this.socket, 'connect', { signal: AbortSignal.timeout(5000) }); }
+    catch (error) { throw unreachable(error, this.path); }
     const initialized = await this.request('initialize', { clientType: 'claude-uds-bridge' }, 0);
     this.clientId = z.object({ clientId: z.string().min(1) }).parse(initialized.result).clientId;
   }
@@ -224,7 +232,7 @@ class DesktopConnection {
           const params = z.object({ conversationId: z.string(), change: z.object({ type: z.string(), conversationState: z.unknown().optional(),
             patches: z.array(z.object({ path: z.array(z.union([z.string(), z.number()])), value: z.unknown().optional() })).optional() }) }).parse(packet.params);
           if (params.conversationId !== this.threadId) continue;
-          if (packet.version !== 11) throw new Error('Unsupported Desktop stream version');
+          if (packet.version !== 11) throw new Error(`Unsupported Desktop stream version ${packet.version}`);
           if (params.change.type === 'snapshot') this.snapshotResult?.resolve(snapshotSchema.parse(params.change.conversationState));
           else if (this.onState && params.change.type === 'patches' && params.change.patches?.some(patch =>
             patch.path.length === 0 || ['threadRuntimeStatus', 'currentPermissions'].includes(String(patch.path[0])))) {
