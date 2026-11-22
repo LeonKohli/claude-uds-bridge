@@ -17,8 +17,8 @@ test('package.json, the plugin manifest, and the marketplace agree on name and v
   expect(existsSync(join(plugin, '../..', marketplace.plugins[0]!.source.path, '.codex-plugin/plugin.json'))).toBe(true);
 });
 
-test('the hooks run servers and bundles that exist', () => {
-  const mcp = z.object({ mcpServers: z.record(z.string(), z.object({ args: z.array(z.string()) })) }).parse(read(join(plugin, '.mcp.json')));
+test('the hooks run servers and bundles that exist, and a server that fails to start leaves the Codex session running', () => {
+  const mcp = z.object({ mcpServers: z.record(z.string(), z.object({ args: z.array(z.string()), required: z.literal(false) })) }).parse(read(join(plugin, '.mcp.json')));
   const hooks = JSON.stringify(read(join(plugin, 'hooks/hooks.json')));
   for (const [name, server] of Object.entries(mcp.mcpServers)) {
     for (const arg of server.args.filter(arg => arg.startsWith('./'))) expect(existsSync(join(plugin, arg))).toBe(true);

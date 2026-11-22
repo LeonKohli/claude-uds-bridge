@@ -9,7 +9,7 @@ Claude Code lists and messages its other sessions through its own local registry
 - Stock Codex with its shared local app-server daemon. CLI tasks on the daemon and desktop tasks it owns work. Older desktop tasks use the desktop IPC fallback. CLI sessions started with `--no-daemon` have no inbox. Real-runtime checks cover Codex 0.159.0, 0.159.2, and 0.159.3.
 - macOS or Linux.
 - Claude Code 2.1.224 or later, the first release with [cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging).
-- Bun on your `PATH`.
+- Bun on the `PATH` that Codex inherits. Without it, Codex tasks still start, but without the bridge.
 
 ## Install
 
