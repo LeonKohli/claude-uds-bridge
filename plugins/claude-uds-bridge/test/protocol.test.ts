@@ -286,8 +286,8 @@ test('mode changes recheck held input without extending deadlines; explicit hold
     await Bun.sleep(30);
     expect(f.bridge.held()[0]?.expires_at).toBe(deadline);
     f.bridge.updateRuntime({ status: 'busy', mode: 'bypass' });
-    await until(() => f.desktop.submissions.length === 1);
-    expect(f.bridge.status().messages.find(row => row.id === id)?.status).toBe('started');
+    await until(() => f.bridge.status().messages.find(row => row.id === id)?.status === 'started');
+    expect(f.desktop.submissions).toHaveLength(1);
     await f.bridge.setPolicy('hold');
     const explicit = await f.message('prompting');
     await until(() => f.bridge.status().heldCount === 1);
